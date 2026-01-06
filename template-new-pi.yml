@@ -1,0 +1,224 @@
+---
+- name: Base Pi Configuration Template
+  hosts: all
+  become: yes
+  
+  tasks:
+    # Disable cloud-init
+    - name: Disable cloud-init
+      copy:
+        content: ""
+        dest: /etc/cloud/cloud-init.disabled
+        mode: '0644'
+        force: no  # Don't overwrite if exists
+    
+    - name: Stop cloud-init services
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      loop:
+        - cloud-config
+        - cloud-final
+        - cloud-init-local
+        - cloud-init-main
+        - cloud-init-network
+      ignore_errors: yes
+    
+    - name: Mask cloud-init-hotplugd (prevents re-enabling)
+      systemd:
+        name: "{{ item }}"
+        masked: yes
+      loop:
+        - cloud-init-hotplugd.service
+        - cloud-init-hotplugd.socket
+      ignore_errors: yes
+    
+    # System basics
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+    
+    - name: Install base packages
+      apt:
+        name:
+          - vim
+          - htop
+          - curl
+          - git
+        state: present
+    
+    - name: Set timezone to Hermosillo
+      community.general.timezone:
+        name: America/Hermosillo
+    
+    - name: Set hostname
+      hostname:
+        name: "{{ new_hostname }}"
+      when: new_hostname is defined
+    
+    - name: Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1       {{ new_hostname }}"
+      when: new_hostname is defined
+    
+    # Make sure bobstephen has sudo without password
+    - name: Ensure bobstephen can sudo without password
+      lineinfile:
+        path: /etc/sudoers.d/bobstephen-nopasswd
+        line: "bobstephen ALL=(ALL) NOPASSWD: ALL"
+        create: yes
+        mode: '0440'
+        validate: 'visudo -cf %s'
+    
+    # SSH
+    - name: Enable SSH
+      systemd:
+        name: ssh
+        enabled: yes
+        state: started
+    
+    # Tailscale - Interactive Login
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+    
+    - name: Download Tailscale GPG key
+      get_url:
+        url: https://pkgs.tailscale.com/stable/raspbian/bookworm.noarmor.gpg
+        dest: /etc/apt/keyrings/tailscale-archive-keyring.gpg
+        mode: '0644'
+    
+    - name: Add Tailscale repository
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/raspbian bookworm main"
+        state: present
+        filename: tailscale
+    
+    - name: Install Tailscale
+      apt:
+        name: tailscale
+        update_cache: yes
+    
+    - name: Check if Tailscale is already connected
+      command: tailscale status
+      register: ts_status
+      changed_when: false
+      failed_when: false
+    
+    - name: Display Tailscale setup instructions
+      debug:
+        msg:
+          - "============================================"
+          - "TAILSCALE SETUP"
+          - "============================================"
+          - "Tailscale is installed. To connect:"
+          - "  sudo tailscale up --hostname={{ new_hostname | default(inventory_hostname) }}"
+          - ""
+          - "Then open the displayed URL in your browser"
+          - "and authorize this device."
+          - "============================================"
+      when: ts_status.rc != 0
+    
+    # Webmin - Direct .deb install
+    - name: Check if Webmin is already installed
+      command: dpkg -l webmin
+      register: webmin_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Download Webmin .deb package
+      get_url:
+        url: https://www.webmin.com/download/deb/webmin-current.deb
+        dest: /tmp/webmin-current.deb
+        mode: '0644'
+      when: webmin_check.rc != 0
+    
+    - name: Install Webmin from .deb
+      apt:
+        deb: /tmp/webmin-current.deb
+        state: present
+      when: webmin_check.rc != 0
+    
+    - name: Fix any dependency issues
+      apt:
+        name: webmin
+        state: fixed
+      when: webmin_check.rc != 0
+    
+    - name: Ensure Webmin is started and enabled
+      systemd:
+        name: webmin
+        enabled: yes
+        state: started
+    
+    # Optimize Webmin for Tailscale access (fixes CPU usage issue)
+    - name: Configure Webmin for Tailscale (fix CPU issue)
+      lineinfile:
+        path: /etc/webmin/miniserv.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^ssl=', line: 'ssl=0' }
+        - { regexp: '^cookie_path=', line: 'cookie_path=/' }
+        - { regexp: '^sessiononly=', line: 'sessiononly=1' }
+        - { regexp: '^trust=', line: 'trust=100.64.0.0/10' }
+        - { regexp: '^logouttime=', line: 'logouttime=10' }
+        - { regexp: '^no_session_clear=', line: 'no_session_clear=1' }
+      notify: restart webmin
+    
+    # Cron jobs
+    - name: Daily updates at 2:05 AM
+      cron:
+        name: "Daily system updates"
+        minute: "5"
+        hour: "2"
+        job: "/usr/bin/apt update && /usr/bin/apt upgrade -y && /usr/bin/apt autoremove -y"
+        user: root
+    
+    - name: Daily reboot at 3:05 AM
+      cron:
+        name: "Daily reboot"
+        minute: "5"
+        hour: "3"
+        job: "/sbin/reboot"
+        user: root
+    
+    - name: Get Tailscale IP
+      command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "===================================="
+          - "{{ inventory_hostname | upper }} configuration complete!"
+          - "===================================="
+          - "Hostname: {{ new_hostname | default(inventory_hostname) }}"
+          - "User: bobstephen"
+          - "cloud-init: DISABLED ✓"
+          - "Tailscale: INSTALLED ✓"
+          - "  IP: {{ tailscale_ip.stdout | default('Not connected yet') }}"
+          - "Webmin: INSTALLED ✓"
+          - "  Tailscale optimized (SSL disabled, CPU fix)"
+          - "Cron jobs: CONFIGURED ✓"
+          - ""
+          - "Cron Schedule:"
+          - "- 2:05 AM: System updates"
+          - "- 3:05 AM: Daily reboot"
+          - ""
+          - "Next: Update inventory.yml with Tailscale IP"
+          - "===================================="
+  
+  handlers:
+    - name: restart webmin
+      systemd:
+        name: webmin
+        state: restarted
