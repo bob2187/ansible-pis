@@ -131,43 +131,51 @@
   serial: 1
   
   tasks:
-    - name: Check if K3s agent is misconfigured
-      shell: |
-        if systemctl is-active --quiet k3s-agent; then
-          if ! grep -q "{{ hostvars['gus']['k3s_server_ip'] }}" /etc/systemd/system/k3s-agent.service.env 2>/dev/null; then
-            echo "misconfigured"
-          fi
-        fi
-      register: k3s_misconfigured
+    - name: Check if K3s binary exists
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+    
+    - name: Check if K3s agent service is active
+      command: systemctl is-active k3s-agent
+      register: k3s_agent_active
       changed_when: false
       failed_when: false
     
+    - name: Check if agent config file exists and is properly configured
+      command: grep -q "{{ hostvars['gus']['k3s_server_ip'] }}" /etc/systemd/system/k3s-agent.service.env
+      register: k3s_agent_configured
+      changed_when: false
+      failed_when: false
+    
+    - name: Set agent installation needed flag
+      set_fact:
+        agent_needs_install: "{{ not k3s_binary.stat.exists or k3s_agent_active.stdout != 'active' or k3s_agent_configured.rc != 0 }}"
+    
     - name: Uninstall misconfigured K3s agent
       shell: /usr/local/bin/k3s-agent-uninstall.sh
-      when: k3s_misconfigured.stdout == "misconfigured"
-    
-    - name: Check if K3s agent is already installed
-      stat:
-        path: /usr/local/bin/k3s-agent
-      register: k3s_agent_installed
+      when: 
+        - k3s_binary.stat.exists
+        - agent_needs_install
     
     - name: Get K3s token from server
       set_fact:
         k3s_token: "{{ hostvars['gus']['k3s_token']['content'] | b64decode | trim }}"
+      when: agent_needs_install
     
     - name: Download K3s install script
       get_url:
         url: https://get.k3s.io
         dest: /tmp/k3s-install.sh
         mode: '0755'
-      when: not k3s_agent_installed.stat.exists
+      when: agent_needs_install
     
     - name: Install K3s agent
       shell: |
         K3S_URL=https://{{ hostvars['gus']['k3s_server_ip'] }}:6443 \
         K3S_TOKEN={{ k3s_token }} \
         /tmp/k3s-install.sh
-      when: not k3s_agent_installed.stat.exists
+      when: agent_needs_install
       register: k3s_agent_install
     
     - name: Wait for node to join cluster
