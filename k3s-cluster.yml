@@ -1,0 +1,217 @@
+---
+- name: Prepare All Nodes for K3s
+  hosts: gus,mike,jesse
+  become: yes
+  
+  tasks:
+    - name: Check if cgroups are already enabled
+      command: grep -q "cgroup_memory=1" /boot/firmware/cmdline.txt
+      register: cgroup_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Backup cmdline.txt
+      copy:
+        src: /boot/firmware/cmdline.txt
+        dest: /boot/firmware/cmdline.txt.backup
+        remote_src: yes
+      when: cgroup_check.rc != 0
+    
+    - name: Enable memory cgroups
+      lineinfile:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^(.*?)(\s+cgroup_memory=1 cgroup_enable=memory)?$'
+        line: '\1 cgroup_memory=1 cgroup_enable=memory'
+        backrefs: yes
+      when: cgroup_check.rc != 0
+      register: cgroup_enabled
+    
+    - name: Reboot worker nodes if cgroups were just enabled
+      reboot:
+        reboot_timeout: 300
+      when: 
+        - cgroup_enabled.changed
+        - inventory_hostname != 'gus'
+    
+    - name: Display Gus reboot message
+      debug:
+        msg:
+          - "===================================="
+          - "IMPORTANT: Gus needs manual reboot!"
+          - "===================================="
+          - "Cgroups were enabled on Gus."
+          - "Please reboot Gus manually:"
+          - "  sudo reboot"
+          - ""
+          - "Then re-run this playbook."
+          - "===================================="
+      when:
+        - inventory_hostname == 'gus'
+        - cgroup_enabled.changed
+    
+    - name: Fail if Gus needs reboot
+      fail:
+        msg: "Gus requires manual reboot. Please reboot and re-run playbook."
+      when:
+        - inventory_hostname == 'gus'
+        - cgroup_enabled.changed
+    
+    - name: Wait for systems to be ready after reboot
+      wait_for_connection:
+        timeout: 300
+        delay: 10
+      when: 
+        - cgroup_enabled.changed
+        - inventory_hostname != 'gus'
+    
+    - name: Verify cgroups are enabled
+      command: cat /proc/cgroups
+      register: cgroups_status
+      changed_when: false
+    
+    - name: Display cgroup status
+      debug:
+        msg: "CGroups enabled on {{ inventory_hostname }}"
+
+- name: Install K3s Server (Control Plane)
+  hosts: gus
+  become: yes
+  
+  tasks:
+    - name: Check if K3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+    
+    - name: Download K3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+      when: not k3s_installed.stat.exists
+    
+    - name: Install K3s server
+      shell: |
+        INSTALL_K3S_EXEC="server --disable traefik" /tmp/k3s-install.sh
+      when: not k3s_installed.stat.exists
+      register: k3s_server_install
+    
+    - name: Wait for K3s to be ready
+      wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        state: present
+        timeout: 120
+    
+    - name: Get K3s node token
+      slurp:
+        path: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token
+    
+    - name: Get K3s server info
+      command: kubectl get nodes
+      register: nodes_status
+      changed_when: false
+      failed_when: false
+    
+    - name: Display K3s server status
+      debug:
+        msg:
+          - "===================================="
+          - "K3s Server Installed on Gus!"
+          - "===================================="
+          - "{{ nodes_status.stdout_lines }}"
+          - ""
+          - "Ready to add worker nodes"
+          - "===================================="
+      when: nodes_status.rc == 0
+
+- name: Install K3s Agent (Worker Nodes)
+  hosts: mike,jesse
+  become: yes
+  serial: 1
+  
+  tasks:
+    - name: Check if K3s agent is misconfigured
+      shell: |
+        if systemctl is-active --quiet k3s-agent; then
+          if ! grep -q "{{ hostvars['gus']['k3s_server_ip'] }}" /etc/systemd/system/k3s-agent.service.env 2>/dev/null; then
+            echo "misconfigured"
+          fi
+        fi
+      register: k3s_misconfigured
+      changed_when: false
+      failed_when: false
+    
+    - name: Uninstall misconfigured K3s agent
+      shell: /usr/local/bin/k3s-agent-uninstall.sh
+      when: k3s_misconfigured.stdout == "misconfigured"
+    
+    - name: Check if K3s agent is already installed
+      stat:
+        path: /usr/local/bin/k3s-agent
+      register: k3s_agent_installed
+    
+    - name: Get K3s token from server
+      set_fact:
+        k3s_token: "{{ hostvars['gus']['k3s_token']['content'] | b64decode | trim }}"
+    
+    - name: Download K3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+      when: not k3s_agent_installed.stat.exists
+    
+    - name: Install K3s agent
+      shell: |
+        K3S_URL=https://{{ hostvars['gus']['k3s_server_ip'] }}:6443 \
+        K3S_TOKEN={{ k3s_token }} \
+        /tmp/k3s-install.sh
+      when: not k3s_agent_installed.stat.exists
+      register: k3s_agent_install
+    
+    - name: Wait for node to join cluster
+      pause:
+        seconds: 10
+      when: k3s_agent_install.changed
+
+- name: Verify Cluster
+  hosts: gus
+  become: yes
+  
+  tasks:
+    - name: Wait for all nodes to be ready
+      pause:
+        seconds: 20
+    
+    - name: Get all nodes
+      command: kubectl get nodes -o wide
+      register: all_nodes
+      changed_when: false
+    
+    - name: Get cluster info
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+    
+    - name: Display cluster status
+      debug:
+        msg:
+          - "===================================="
+          - "K3S CLUSTER STATUS"
+          - "===================================="
+          - "{{ all_nodes.stdout_lines }}"
+          - ""
+          - "{{ cluster_info.stdout_lines }}"
+          - ""
+          - "Cluster ready!"
+          - "===================================="
+          - ""
+          - "Access kubectl from Gus:"
+          - "  kubectl get nodes"
+          - "  kubectl get pods -A"
+          - ""
+          - "Or from remote machine:"
+          - "  scp bobstephen@100.103.213.74:/etc/rancher/k3s/k3s.yaml ~/.kube/k3s-config"
+          - "  export KUBECONFIG=~/.kube/k3s-config"
+          - "===================================="
