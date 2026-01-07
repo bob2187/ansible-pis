@@ -4,11 +4,16 @@ all:
       ansible_host: 127.0.0.1
       ansible_connection: local
       new_hostname: gus
-    
+      k3s_server_ip: 100.103.213.74
+
     mike:
       ansible_host: 100.96.132.126
       new_hostname: mike
-  
+
+    jesse:
+      ansible_host: 100.72.62.109
+      new_hostname: jesse
+
   vars:
     ansible_user: bobstephen
     ansible_python_interpreter: /usr/bin/python3
