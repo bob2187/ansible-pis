@@ -13,10 +13,10 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: local-path
   resources:
     requests:
       storage: 1Gi
+  storageClassName: local-path
 
 ---
 apiVersion: v1
@@ -27,10 +27,10 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: local-path
   resources:
     requests:
       storage: 1Gi
+  storageClassName: local-path
 
 ---
 apiVersion: v1
@@ -58,35 +58,40 @@ spec:
       labels:
         app: pihole
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: gus
+      hostNetwork: true
+      dnsPolicy: ClusterFirst
       containers:
       - name: pihole
         image: pihole/pihole:latest
+        envFrom:
+        - configMapRef:
+            name: pihole-env
         ports:
-        - containerPort: 80
-          name: web
-          protocol: TCP
         - containerPort: 53
+          hostPort: 53
           name: dns-tcp
           protocol: TCP
         - containerPort: 53
+          hostPort: 53
           name: dns-udp
           protocol: UDP
-        env:
-        - name: TZ
-          valueFrom:
-            configMapKeyRef:
-              name: pihole-env
-              key: TZ
-        - name: PIHOLE_DNS_
-          valueFrom:
-            configMapKeyRef:
-              name: pihole-env
-              key: PIHOLE_DNS_
+        - containerPort: 80
+          name: http
+          protocol: TCP
+        - containerPort: 443
+          name: https
+          protocol: TCP
         volumeMounts:
         - name: pihole-etc
           mountPath: /etc/pihole
         - name: pihole-dnsmasq
           mountPath: /etc/dnsmasq.d
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
       volumes:
       - name: pihole-etc
         persistentVolumeClaim:
@@ -109,26 +114,5 @@ spec:
   - port: 80
     targetPort: 80
     nodePort: 30080
-    name: web
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: pihole-dns
-  namespace: pihole
-spec:
-  type: NodePort
-  selector:
-    app: pihole
-  ports:
-  - port: 53
-    targetPort: 53
-    nodePort: 30053
     protocol: TCP
-    name: dns-tcp
-  - port: 53
-    targetPort: 53
-    nodePort: 30053
-    protocol: UDP
-    name: dns-udp
+    name: http
