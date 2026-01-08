@@ -53,27 +53,32 @@
         name: America/Hermosillo
     
     # Enable memory cgroups for K3s
-    - name: Check if cgroups are already enabled
-      command: grep -q "cgroup_memory=1" /boot/firmware/cmdline.txt
-      register: cgroup_check
-      changed_when: false
-      failed_when: false
-    
-    - name: Backup cmdline.txt
+    - name: Backup cmdline.txt before modifying
       copy:
         src: /boot/firmware/cmdline.txt
         dest: /boot/firmware/cmdline.txt.backup
         remote_src: yes
-      when: cgroup_check.rc != 0
+        force: no
     
-    - name: Enable memory cgroups for K3s
-      lineinfile:
-        path: /boot/firmware/cmdline.txt
-        backrefs: yes
-        regexp: '^(.*?)(\s+cgroup_memory=1 cgroup_enable=memory)?$'
-        line: '\1 cgroup_memory=1 cgroup_enable=memory'
-      when: cgroup_check.rc != 0
-      register: cgroup_enabled
+    - name: Read current cmdline.txt
+      slurp:
+        src: /boot/firmware/cmdline.txt
+      register: cmdline_content
+    
+    - name: Check if cgroups already present
+      set_fact:
+        cgroups_present: "{{ (cmdline_content.content | b64decode).find('cgroup_memory=1') != -1 }}"
+    
+    - name: Add cgroups to cmdline.txt if not present
+      shell: |
+        cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.pre-cgroup
+        echo "$(cat /boot/firmware/cmdline.txt | tr -d '\n') cgroup_memory=1 cgroup_enable=memory" > /boot/firmware/cmdline.txt
+      when: not cgroups_present
+      register: cgroups_added
+    
+    - name: Display cgroup status
+      debug:
+        msg: "Memory cgroups {{ 'were added - REBOOT REQUIRED' if cgroups_added.changed else 'already configured' }}"
     
     - name: Set hostname
       hostname:
@@ -195,22 +200,19 @@
         - { regexp: '^no_session_clear=', line: 'no_session_clear=1' }
       notify: restart webmin
     
-    # VNC Server
-    - name: Install VNC server (wayvnc)
-      apt:
-        name:
-          - wayvnc
-          - wlroots
-        state: present
-        update_cache: yes
-      ignore_errors: yes
+    # VNC Server (using raspi-config)
+    - name: Enable VNC via raspi-config
+      command: raspi-config nonint do_vnc 0
+      args:
+        creates: /etc/systemd/system/multi-user.target.wants/vncserver-x11-serviced.service
+      register: vnc_enabled
     
-    - name: Enable VNC server on boot
+    - name: Start VNC server
       systemd:
-        name: wayvnc
+        name: vncserver-x11-serviced
         enabled: yes
         state: started
-      ignore_errors: yes
+      when: vnc_enabled.changed
     
     # Cron jobs
     - name: Daily updates at 2:05 AM
@@ -244,20 +246,20 @@
           - "Hostname: {{ new_hostname | default(inventory_hostname) }}"
           - "User: bobstephen"
           - "cloud-init: DISABLED ✓"
-          - "Memory cgroups: {{ 'ENABLED (reboot required)' if cgroup_enabled.changed else 'Already enabled' }} ✓"
+          - "Memory cgroups: {{ 'ENABLED (reboot required)' if cgroups_added is defined and cgroups_added.changed else 'Already enabled' }} ✓"
           - "Tailscale: INSTALLED ✓"
           - "  IP: {{ tailscale_ip.stdout | default('Not connected yet') }}"
           - "Webmin: INSTALLED ✓"
           - "  Tailscale optimized (SSL disabled, CPU fix)"
           - "VNC: INSTALLED ✓"
-          - "  wayvnc service enabled"
+          - "  RealVNC server enabled"
           - "Cron jobs: CONFIGURED ✓"
           - ""
           - "Cron Schedule:"
           - "- 2:05 AM: System updates"
           - "- 3:05 AM: Daily reboot"
           - ""
-          - "{% if cgroup_enabled.changed %}IMPORTANT: Reboot required for K3s (cgroups enabled){% endif %}"
+          - "{% if cgroups_added is defined and cgroups_added.changed %}*** REBOOT REQUIRED FOR K3S ***{% endif %}"
           - ""
           - "Next: Update inventory.yml with Tailscale IP"
           - "===================================="

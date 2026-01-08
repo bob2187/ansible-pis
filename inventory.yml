@@ -11,7 +11,7 @@ all:
       new_hostname: mike
 
     jesse:
-      ansible_host: 100.72.62.109
+      ansible_host: 100.96.132.126
       new_hostname: jesse
 
   vars:
