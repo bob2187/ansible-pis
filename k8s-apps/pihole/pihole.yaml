@@ -1,0 +1,134 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pihole
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pihole-etc
+  namespace: pihole
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pihole-dnsmasq
+  namespace: pihole
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pihole-env
+  namespace: pihole
+data:
+  TZ: "America/Hermosillo"
+  PIHOLE_DNS_: "1.1.1.1;8.8.8.8"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pihole
+  namespace: pihole
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pihole
+  template:
+    metadata:
+      labels:
+        app: pihole
+    spec:
+      containers:
+      - name: pihole
+        image: pihole/pihole:latest
+        ports:
+        - containerPort: 80
+          name: web
+          protocol: TCP
+        - containerPort: 53
+          name: dns-tcp
+          protocol: TCP
+        - containerPort: 53
+          name: dns-udp
+          protocol: UDP
+        env:
+        - name: TZ
+          valueFrom:
+            configMapKeyRef:
+              name: pihole-env
+              key: TZ
+        - name: PIHOLE_DNS_
+          valueFrom:
+            configMapKeyRef:
+              name: pihole-env
+              key: PIHOLE_DNS_
+        volumeMounts:
+        - name: pihole-etc
+          mountPath: /etc/pihole
+        - name: pihole-dnsmasq
+          mountPath: /etc/dnsmasq.d
+      volumes:
+      - name: pihole-etc
+        persistentVolumeClaim:
+          claimName: pihole-etc
+      - name: pihole-dnsmasq
+        persistentVolumeClaim:
+          claimName: pihole-dnsmasq
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pihole-web
+  namespace: pihole
+spec:
+  type: NodePort
+  selector:
+    app: pihole
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30080
+    name: web
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pihole-dns
+  namespace: pihole
+spec:
+  type: NodePort
+  selector:
+    app: pihole
+  ports:
+  - port: 53
+    targetPort: 53
+    nodePort: 30053
+    protocol: TCP
+    name: dns-tcp
+  - port: 53
+    targetPort: 53
+    nodePort: 30053
+    protocol: UDP
+    name: dns-udp
