@@ -188,6 +188,30 @@
         job: "/sbin/reboot"
         user: root
     
+# Fix kubectl permissions after K3s starts
+    - name: Create systemd drop-in directory for k3s
+      file:
+        path: /etc/systemd/system/k3s.service.d
+        state: directory
+        mode: '0755'
+    
+    - name: Add k3s kubeconfig permissions fix
+      copy:
+        dest: /etc/systemd/system/k3s.service.d/kubeconfig-permissions.conf
+        content: |
+          [Service]
+          ExecStartPost=/bin/sleep 2
+          ExecStartPost=/bin/chmod 644 /etc/rancher/k3s/k3s.yaml
+        mode: '0644'
+      register: k3s_dropin
+    
+    - name: Reload systemd and restart k3s if needed
+      systemd:
+        daemon_reload: yes
+        name: k3s
+        state: restarted
+      when: k3s_dropin.changed
+    
     - name: Display completion message
       debug:
         msg:
